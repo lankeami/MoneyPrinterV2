@@ -346,36 +346,48 @@ class YouTube:
             },
         }
 
-        try:
-            response = requests.post(
-                endpoint,
-                headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
-                json=payload,
-                timeout=300,
-            )
-            response.raise_for_status()
-            body = response.json()
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    endpoint,
+                    headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=300,
+                )
+                if response.status_code == 429 and attempt < max_retries - 1:
+                    wait = 30 * (attempt + 1)
+                    warning(f"Rate limited (429). Waiting {wait}s before retry {attempt + 2}/{max_retries}...")
+                    time.sleep(wait)
+                    continue
+                response.raise_for_status()
+                body = response.json()
 
-            candidates = body.get("candidates", [])
-            for candidate in candidates:
-                content = candidate.get("content", {})
-                for part in content.get("parts", []):
-                    inline_data = part.get("inlineData") or part.get("inline_data")
-                    if not inline_data:
-                        continue
-                    data = inline_data.get("data")
-                    mime_type = inline_data.get("mimeType") or inline_data.get("mime_type", "")
-                    if data and str(mime_type).startswith("image/"):
-                        image_bytes = base64.b64decode(data)
-                        return self._persist_image(image_bytes, "Nano Banana 2 API")
+                candidates = body.get("candidates", [])
+                for candidate in candidates:
+                    content = candidate.get("content", {})
+                    for part in content.get("parts", []):
+                        inline_data = part.get("inlineData") or part.get("inline_data")
+                        if not inline_data:
+                            continue
+                        data = inline_data.get("data")
+                        mime_type = inline_data.get("mimeType") or inline_data.get("mime_type", "")
+                        if data and str(mime_type).startswith("image/"):
+                            image_bytes = base64.b64decode(data)
+                            return self._persist_image(image_bytes, "Nano Banana 2 API")
 
-            if get_verbose():
-                warning(f"Nano Banana 2 did not return an image payload. Response: {body}")
-            return None
-        except Exception as e:
-            if get_verbose():
-                warning(f"Failed to generate image with Nano Banana 2 API: {str(e)}")
-            return None
+                if get_verbose():
+                    warning(f"Nano Banana 2 did not return an image payload. Response: {body}")
+                return None
+            except Exception as e:
+                if get_verbose():
+                    warning(f"Failed to generate image with Nano Banana 2 API: {str(e)}")
+                if attempt < max_retries - 1 and "429" in str(e):
+                    wait = 15 * (attempt + 1)
+                    warning(f"Waiting {wait}s before retry {attempt + 2}/{max_retries}...")
+                    time.sleep(wait)
+                    continue
+                return None
 
     def generate_image(self, prompt: str) -> str:
         """
@@ -669,8 +681,14 @@ class YouTube:
         self.generate_prompts()
 
         # Generate the Images
-        for prompt in self.image_prompts:
+        for i, prompt in enumerate(self.image_prompts):
             self.generate_image(prompt)
+            if i < len(self.image_prompts) - 1:
+                time.sleep(15)
+
+        if not self.images:
+            error("No images were generated (all API calls failed). Cannot create video.")
+            return None
 
         # Generate the TTS
         self.generate_script_to_speech(tts_instance)
